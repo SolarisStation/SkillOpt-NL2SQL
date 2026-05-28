@@ -6,14 +6,14 @@ import os
 
 from skillopt.datasets.base import BatchSpec
 from skillopt.envs.base import EnvAdapter
-from skillopt.envs.searchqa.dataloader import SearchQADataLoader
-from skillopt.envs.searchqa.rollout import run_batch
+from skillopt.envs.nl2sql.dataloader import NL2SQLDataLoader
+from skillopt.envs.nl2sql.rollout import run_batch
 from skillopt.gradient.reflect import run_minibatch_reflect
 from skillopt.model import get_target_backend
 
 
-class SearchQAAdapter(EnvAdapter):
-    """SearchQA environment adapter."""
+class NL2SQLAdapter(EnvAdapter):
+    """NL2SQL environment adapter."""
 
     def __init__(
         self,
@@ -42,7 +42,7 @@ class SearchQAAdapter(EnvAdapter):
         self.failure_only = failure_only
         self.minibatch_size = minibatch_size
         self.edit_budget = edit_budget
-        self.dataloader = SearchQADataLoader(
+        self.dataloader = NL2SQLDataLoader(
             split_dir=split_dir,
             data_path=data_path,
             split_mode=split_mode,

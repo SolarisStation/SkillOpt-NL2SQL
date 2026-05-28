@@ -39,59 +39,10 @@ _ENV_REGISTRY: dict[str, type] = {}
 def _register_builtins() -> None:
     """Lazy-import built-in adapters so we don't pull heavy deps at CLI parse time."""
     try:
-        from skillopt.envs.alfworld.adapter import ALFWorldAdapter
-        _ENV_REGISTRY["alfworld"] = ALFWorldAdapter
-    except ImportError:
-        pass  # ALFWorld deps not installed — skip
-    try:
-        from skillopt.envs.searchqa.adapter import SearchQAAdapter
-        _ENV_REGISTRY["searchqa"] = SearchQAAdapter
-    except ImportError:
-        pass
-    try:
-        from skillopt.envs.livemathematicianbench.adapter import LiveMathematicianBenchAdapter
-        _ENV_REGISTRY["livemathematicianbench"] = LiveMathematicianBenchAdapter
-    except ImportError:
-        pass
-    try:
-        from skillopt.envs.babyvision.adapter import BabyVisionAdapter
-        _ENV_REGISTRY["babyvision"] = BabyVisionAdapter
-    except ImportError:
-        pass
-    try:
-        from skillopt.envs.spreadsheetbench.adapter import SpreadsheetBenchAdapter
-        _ENV_REGISTRY["spreadsheetbench"] = SpreadsheetBenchAdapter
-    except ImportError:
-        pass
-    try:
-        from skillopt.envs.mmrb.adapter import MMRBAdapter
-        _ENV_REGISTRY["mmrb"] = MMRBAdapter
-    except ImportError:
-        pass
-    try:
-        from skillopt.envs.docvqa.adapter import DocVQAAdapter
-        _ENV_REGISTRY["docvqa"] = DocVQAAdapter
-    except ImportError:
-        pass
-    try:
-        from skillopt.envs.mathverse.adapter import MathVerseAdapter
-        _ENV_REGISTRY["mathverse"] = MathVerseAdapter
-    except ImportError:
-        pass
-    try:
-        from skillopt.envs.officeqa.adapter import OfficeQAAdapter
-        _ENV_REGISTRY["officeqa"] = OfficeQAAdapter
-    except ImportError:
-        pass
-    try:
-        from skillopt.envs.sealqa.adapter import SealQAAdapter
-        _ENV_REGISTRY["sealqa"] = SealQAAdapter
-    except ImportError:
-        pass
-    try:
-        from skillopt.envs.swebench.adapter import SWEBenchAdapter
-        _ENV_REGISTRY["swebench"] = SWEBenchAdapter
-    except ImportError:
+        from skillopt.envs.nl2sql.adapter import NL2SQLAdapter
+        _ENV_REGISTRY["nl2sql"] = NL2SQLAdapter
+    except ImportError as e:
+        print(f"Failed to import NL2SQLAdapter: {e}")
         pass
 
 

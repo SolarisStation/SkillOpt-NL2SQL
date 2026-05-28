@@ -1,45 +1,69 @@
-"""LiveMathematicianBench rollout — theorem-grounded math MCQ agent."""
+"""NL2SQL rollout — single-turn QA agent + batch execution.
+
+The QA agent receives a skill document, question, and context passages,
+then produces an answer in <answer>...</answer> tags.
+
+Public API
+----------
+- :func:`process_one`  — run + evaluate one QA item
+- :func:`run_batch`    — parallel execution of a list of items
+"""
 from __future__ import annotations
 
 import json
 import os
 import time
+import traceback
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-from skillopt.envs.livemathematicianbench.evaluator import evaluate
 from skillopt.model import chat_target, get_target_backend, is_target_exec_backend
 from skillopt.model.codex_harness import prepare_workspace, render_skill_md, run_target_exec
 from skillopt.prompts import load_prompt
+from skillopt.envs.nl2sql.evaluator import evaluate
+
+
+# ── Prompt templates ─────────────────────────────────────────────────────────
+
+_MAX_CONTEXT_CHARS = 6000
+
+
+def _truncate_context(context: str, max_chars: int = _MAX_CONTEXT_CHARS) -> str:
+    """Truncate context at [DOC] boundaries to stay within budget."""
+    if len(context) <= max_chars:
+        return context
+    docs = context.split("[DOC]")
+    result = ""
+    for doc in docs:
+        candidate = result + "[DOC]" + doc if result else doc
+        if len(candidate) > max_chars:
+            break
+        result = candidate
+    if not result:
+        result = context[:max_chars] + "\n...[truncated]"
+    return result
+
 
 def _build_system(skill_content: str) -> str:
     if skill_content.strip():
         skill_section = f"## Skill\n{skill_content.strip()}\n\n"
     else:
         skill_section = ""
-    return load_prompt("rollout_system", env="livemathematicianbench").format(skill_section=skill_section)
-
-
-def _format_choices(choices: list[dict]) -> str:
-    return "\n".join(
-        f"{choice['label']}. {choice['text']}"
-        for choice in choices
-    )
+    return load_prompt("rollout_system", env="nl2sql").format(skill_section=skill_section)
 
 
 def _build_user(
-    item: dict,
+    question: str,
+    context: str,
     *,
-    use_theorem: bool = False,
-    use_sketch: bool = False,
     diagnostic_mode: bool = False,
     diagnostic_instruction: str = "",
     diagnostic_trace_context: str = "",
 ) -> str:
-    parts = [f"## Question\n{item['question']}", f"## Choices\n{_format_choices(item['choices'])}"]
-    if use_theorem and item.get("theorem"):
-        parts.append(f"## Theorem\n{item['theorem']}")
-    if use_sketch and item.get("sketch"):
-        parts.append(f"## Proof Sketch\n{item['sketch']}")
+    context = _truncate_context(context)
+    parts = [
+        f"## Context\n{context}",
+        f"## Question\n{question}",
+    ]
     if diagnostic_trace_context.strip():
         parts.append(
             "## Previous Codex Trace Snapshot\n"
@@ -54,31 +78,31 @@ def _build_user(
 def _build_codex_skill(skill_content: str) -> str:
     return render_skill_md(
         skill_content,
-        description="Dynamic ReflACT skill for solving the current LiveMathematicianBench multiple-choice question.",
+        description="Dynamic ReflACT skill for solving the current NL2SQL example.",
         preamble=(
-            "Use this skill when solving the current math multiple-choice question.\n"
-            "Inspect the option wording carefully and output only the final choice label inside <answer>...</answer>."
+            "Use this skill when solving the current NL2SQL task.\n"
+            "Read the provided context carefully, ground the answer in that context,\n"
+            "and return the final answer inside <answer>...</answer>."
         ),
     )
+
 
 def _run_codex_once(
     *,
     pred_dir: str,
     skill_content: str,
-    item: dict,
+    question: str,
+    context: str,
     model: str,
     timeout: int,
-    use_theorem: bool = False,
-    use_sketch: bool = False,
     diagnostic_mode: bool = False,
     diagnostic_instruction: str = "",
     diagnostic_trace_context: str = "",
     previous_response: str = "",
 ) -> tuple[str, str, str, str]:
     user = _build_user(
-        item,
-        use_theorem=use_theorem,
-        use_sketch=use_sketch,
+        question,
+        context,
         diagnostic_mode=diagnostic_mode,
         diagnostic_instruction=diagnostic_instruction,
         diagnostic_trace_context=diagnostic_trace_context,
@@ -88,16 +112,20 @@ def _run_codex_once(
         task_parts.append(
             "## Previous Attempt\n"
             f"{previous_response}\n\n"
-            "Re-evaluate the exact option wording. If needed, correct it."
+            "Review it against the same context and question. If needed, correct it."
         )
     task_text = "\n\n".join(task_parts)
     skill_md = _build_codex_skill(skill_content)
     work_dir = os.path.join(pred_dir, "codex_exec")
-    prepare_workspace(work_dir=work_dir, skill_md=skill_md, task_text=task_text)
+    prepare_workspace(
+        work_dir=work_dir,
+        skill_md=skill_md,
+        task_text=task_text,
+    )
     prompt = (
         "Use the `skillopt-target` skill available in this workspace.\n"
-        "Read `task.md` and solve the multiple-choice problem.\n"
-        "Output only the final choice label inside <answer>...</answer>."
+        "Read `task.md` and answer the NL2SQL question.\n"
+        "Return the final answer inside <answer>...</answer>."
     )
     final_message, raw = run_target_exec(
         work_dir=work_dir,
@@ -108,32 +136,53 @@ def _run_codex_once(
     return final_message or raw, raw, skill_md, task_text
 
 
+# ── Single-item execution ───────────────────────────────────────────────────
+
+
 def process_one(
     item: dict,
     out_root: str,
     skill_content: str,
-    *,
     max_turns: int = 1,
-    use_theorem: bool = False,
-    use_sketch: bool = False,
     diagnostic_mode: bool = False,
     diagnostic_instruction: str = "",
     diagnostic_trace_context: str = "",
-    exec_timeout: int = 300,
+    exec_timeout: int = 120,
     max_completion_tokens: int = 16384,
 ) -> dict:
+    """Process a single QA item: run agent + evaluate.
+
+    Parameters
+    ----------
+    item : dict
+        Must have keys: ``id``, ``question``, ``context``, ``answers``.
+    out_root : str
+        Output directory (predictions saved under ``predictions/<id>/``).
+    skill_content : str
+        Current skill document text.
+    max_turns : int
+        Max reasoning turns (1 = single-turn QA).
+
+    Returns
+    -------
+    dict
+        Result with ``hard`` (EM as int), ``soft`` (F1), etc.
+    """
     item_id = str(item["id"])
+    question = item["question"]
+    context = item.get("context", "")
+    gold_answers = item.get("answers", [])
+
     result = {
         "id": item_id,
-        "question": item["question"],
-        "task_type": item.get("theorem_type", ["math_mcq"])[0] if item.get("theorem_type") else "math_mcq",
+        "question": question,
+        "em": 0.0,
+        "f1": 0.0,
+        "sub_em": 0.0,
         "hard": 0,
         "soft": 0.0,
         "predicted_answer": "",
-        "predicted_label": "",
-        "predicted_text": "",
-        "correct_label": item["correct_choice"]["label"],
-        "correct_text": item["correct_choice"]["text"],
+        "gold_answers": gold_answers,
         "response": "",
         "fail_reason": "",
         "agent_ok": False,
@@ -155,48 +204,49 @@ def process_one(
                 response, raw, system, user = _run_codex_once(
                     pred_dir=pred_dir,
                     skill_content=skill_content,
-                    item=item,
+                    question=question,
+                    context=context,
                     model=_llm.TARGET_DEPLOYMENT,
                     timeout=exec_timeout,
-                    use_theorem=use_theorem,
-                    use_sketch=use_sketch,
                     diagnostic_mode=diagnostic_mode if turn == 0 else False,
                     diagnostic_instruction=diagnostic_instruction if turn == 0 else "",
                     diagnostic_trace_context=diagnostic_trace_context if turn == 0 else "",
                     previous_response=response if turn > 0 else "",
                 )
                 conversation.append({"type": "message", "turn": turn + 1, "content": response})
-                if "<answer>" in response.lower():
+                if turn > 0 and "<answer>" in response.lower():
                     break
 
             result["response"] = response
             result["agent_ok"] = True
             result["n_turns"] = len(conversation)
 
-            with open(os.path.join(pred_dir, "target_system_prompt.txt"), "w", encoding="utf-8") as f:
+            with open(os.path.join(pred_dir, "target_system_prompt.txt"), "w") as f:
                 f.write(system)
-            with open(os.path.join(pred_dir, "target_user_prompt.txt"), "w", encoding="utf-8") as f:
+            with open(os.path.join(pred_dir, "target_user_prompt.txt"), "w") as f:
                 f.write(user)
+            with open(os.path.join(pred_dir, "conversation.json"), "w") as f:
+                json.dump(conversation, f, ensure_ascii=False, indent=2)
 
-            eval_result = evaluate(response, item["correct_choice"], item["choices"])
+            eval_result = evaluate(response, gold_answers)
+            result["em"] = eval_result["em"]
+            result["f1"] = eval_result["f1"]
+            result["sub_em"] = eval_result["sub_em"]
+            result["predicted_answer"] = eval_result["predicted_answer"]
             result["hard"] = int(eval_result["em"])
             result["soft"] = eval_result["f1"]
-            result["predicted_answer"] = eval_result["predicted_answer"]
-            result["predicted_label"] = eval_result["predicted_label"]
-            result["predicted_text"] = eval_result["predicted_text"]
-            if not result["hard"]:
+            if eval_result["em"] < 1.0:
                 result["fail_reason"] = (
-                    f"MCQ=0: predicted '{eval_result['predicted_label'] or eval_result['predicted_answer']}' "
-                    f"but expected '{eval_result['correct_label']}'"
+                    f"EM=0: predicted '{eval_result['predicted_answer']}' "
+                    f"but expected {gold_answers}"
                 )
             eval_detail = (
                 f"[EVALUATION RESULT]\n"
-                f"Question: {item['question']}\n"
-                f"Predicted label: {eval_result['predicted_label']!r}\n"
-                f"Predicted text: {eval_result['predicted_text']!r}\n"
-                f"Correct label: {eval_result['correct_label']!r}\n"
-                f"Correct text: {eval_result['correct_text']!r}\n"
-                f"Exact Match: {eval_result['em']}"
+                f"Question: {question}\n"
+                f"Predicted answer: {eval_result['predicted_answer']!r}\n"
+                f"Gold answers: {gold_answers!r}\n"
+                f"Exact Match: {eval_result['em']}\n"
+                f"F1: {eval_result['f1']:.4f}"
             )
             conversation.append({"role": "system", "content": eval_detail})
             with open(os.path.join(pred_dir, "conversation.json"), "w") as f:
@@ -205,78 +255,85 @@ def process_one(
 
         system = _build_system(skill_content)
         user = _build_user(
-            item,
-            use_theorem=use_theorem,
-            use_sketch=use_sketch,
+            question,
+            context,
             diagnostic_mode=diagnostic_mode,
             diagnostic_instruction=diagnostic_instruction,
             diagnostic_trace_context=diagnostic_trace_context,
         )
+
         conversation: list[dict] = []
         response = ""
 
         for turn in range(max_turns):
             if turn == 0:
                 resp_text, _ = chat_target(
-                    system=system,
-                    user=user,
+                    system=system, user=user,
                     max_completion_tokens=max_completion_tokens,
-                    retries=5,
-                    stage="rollout",
+                    retries=5, stage="rollout",
                     timeout=exec_timeout,
                 )
             else:
                 refinement = (
                     f"Your previous answer was:\n{response}\n\n"
-                    "Re-evaluate the exact option wording. If needed, correct it. "
-                    "Output only the final choice label inside <answer>...</answer>."
+                    f"Review it against the context and question. "
+                    f"If correct, repeat it. If wrong, provide a corrected answer.\n"
+                    f"Use <answer>...</answer> tags for your final answer."
                 )
                 resp_text, _ = chat_target(
-                    system=system,
-                    user=refinement,
+                    system=system, user=refinement,
                     max_completion_tokens=max_completion_tokens,
-                    retries=5,
-                    stage="rollout",
+                    retries=5, stage="rollout",
                     timeout=exec_timeout,
                 )
+
             response = resp_text
             conversation.append({"type": "message", "turn": turn + 1, "content": resp_text})
-            if "<answer>" in resp_text.lower():
+
+            if turn > 0 and "<answer>" in resp_text.lower():
                 break
 
         result["response"] = response
         result["agent_ok"] = True
         result["n_turns"] = len(conversation)
 
-        with open(os.path.join(pred_dir, "target_system_prompt.txt"), "w", encoding="utf-8") as f:
+        # Save conversation
+        with open(os.path.join(pred_dir, "target_system_prompt.txt"), "w") as f:
             f.write(system)
-        with open(os.path.join(pred_dir, "target_user_prompt.txt"), "w", encoding="utf-8") as f:
+        with open(os.path.join(pred_dir, "target_user_prompt.txt"), "w") as f:
             f.write(user)
+        with open(os.path.join(pred_dir, "conversation.json"), "w") as f:
+            json.dump(conversation, f, ensure_ascii=False, indent=2)
 
-        eval_result = evaluate(response, item["correct_choice"], item["choices"])
+        # Evaluate
+        eval_result = evaluate(response, gold_answers)
+        result["em"] = eval_result["em"]
+        result["f1"] = eval_result["f1"]
+        result["sub_em"] = eval_result["sub_em"]
+        result["predicted_answer"] = eval_result["predicted_answer"]
         result["hard"] = int(eval_result["em"])
         result["soft"] = eval_result["f1"]
-        result["predicted_answer"] = eval_result["predicted_answer"]
-        result["predicted_label"] = eval_result["predicted_label"]
-        result["predicted_text"] = eval_result["predicted_text"]
 
-        if not result["hard"]:
+        if eval_result["em"] < 1.0:
             result["fail_reason"] = (
-                f"MCQ=0: predicted '{eval_result['predicted_label'] or eval_result['predicted_answer']}' "
-                f"but expected '{eval_result['correct_label']}'"
+                f"EM=0: predicted '{eval_result['predicted_answer']}' "
+                f"but expected {gold_answers}"
             )
 
+        # Append eval details to conversation for the analyst
         eval_detail = (
             f"[EVALUATION RESULT]\n"
-            f"Question: {item['question']}\n"
-            f"Predicted label: {eval_result['predicted_label']!r}\n"
-            f"Predicted text: {eval_result['predicted_text']!r}\n"
-            f"Correct label: {eval_result['correct_label']!r}\n"
-            f"Correct text: {eval_result['correct_text']!r}\n"
-            f"Exact Match: {eval_result['em']}"
+            f"Question: {question}\n"
+            f"Predicted answer: {eval_result['predicted_answer']!r}\n"
+            f"Gold answers: {gold_answers!r}\n"
+            f"Exact Match: {eval_result['em']}\n"
+            f"F1: {eval_result['f1']:.4f}"
         )
-        conversation.append({"role": "system", "content": eval_detail})
-
+        conversation.append({
+            "role": "system",
+            "content": eval_detail,
+        })
+        # Re-save enriched conversation
         with open(os.path.join(pred_dir, "conversation.json"), "w") as f:
             json.dump(conversation, f, ensure_ascii=False, indent=2)
 
@@ -286,26 +343,28 @@ def process_one(
     return result
 
 
+# ── Batch execution ──────────────────────────────────────────────────────────
+
+
 def run_batch(
     items: list[dict],
     out_root: str,
     skill_content: str,
-    *,
     max_turns: int = 1,
-    exec_timeout: int = 300,
+    exec_timeout: int = 120,
     workers: int = 64,
     max_completion_tokens: int = 16384,
-    use_theorem: bool = False,
-    use_sketch: bool = False,
     diagnostic_mode: bool = False,
     diagnostic_instruction: str = "",
     diagnostic_trace_context_by_id: dict[str, str] | None = None,
     task_timeout: int = 600,
 ) -> list[dict]:
+    """Run QA agent on all items with ThreadPoolExecutor. Resume-aware."""
     task_timeout = max(int(task_timeout), int(exec_timeout) + 60)
     results_path = os.path.join(out_root, "results.jsonl")
     os.makedirs(out_root, exist_ok=True)
 
+    # Resume: load already-done
     done_ids: set[str] = set()
     existing: list[dict] = []
     if os.path.exists(results_path):
@@ -330,55 +389,49 @@ def run_batch(
 
     results = list(existing)
 
-    started_at: dict[str, float] = {}
-
-    def _run_one(it: dict) -> dict:
-        started_at[str(it["id"])] = time.time()
-        return process_one(
-            it,
-            out_root,
-            skill_content,
-            max_turns=max_turns,
-            exec_timeout=exec_timeout,
-            max_completion_tokens=max_completion_tokens,
-            use_theorem=use_theorem,
-            use_sketch=use_sketch,
-            diagnostic_mode=diagnostic_mode,
-            diagnostic_instruction=diagnostic_instruction,
-            diagnostic_trace_context=(diagnostic_trace_context_by_id or {}).get(str(it["id"]), ""),
-        )
-
-    def _timeout_result(it: dict) -> dict:
-        correct = it.get("correct_choice") or {}
+    def _timeout_result(item: dict) -> dict:
         return {
-            "id": str(it["id"]),
-            "question": it.get("question", ""),
-            "task_type": it.get("theorem_type", ["math_mcq"])[0] if it.get("theorem_type") else "math_mcq",
+            "id": str(item["id"]),
+            "question": item.get("question", ""),
+            "task_description": item.get("question", ""),
+            "task_type": item.get("task_type") or "searchqa",
             "hard": 0,
             "soft": 0.0,
             "predicted_answer": "",
-            "predicted_label": "",
-            "predicted_text": "",
-            "correct_label": correct.get("label", ""),
-            "correct_text": correct.get("text", ""),
             "response": "",
             "fail_reason": f"task-timeout-{task_timeout}s",
             "agent_ok": False,
             "n_turns": 0,
+            "gold_answer": item.get("answers", []),
+            "phase": "timeout",
         }
 
-    def _error_result(it: dict, exc: Exception) -> dict:
-        res = _timeout_result(it)
-        res["fail_reason"] = f"error: {type(exc).__name__}: {exc}"
-        return res
+    def _error_result(item: dict, exc: Exception) -> dict:
+        row = _timeout_result(item)
+        row["phase"] = "error"
+        row["fail_reason"] = f"unexpected: {type(exc).__name__}: {exc}"
+        return row
+
+    started_at: dict[str, float] = {}
+
+    def _run_one(item: dict) -> dict:
+        started_at[str(item["id"])] = time.time()
+        return process_one(
+            item,
+            out_root,
+            skill_content,
+            max_turns,
+            diagnostic_mode,
+            diagnostic_instruction,
+            (diagnostic_trace_context_by_id or {}).get(str(item["id"]), ""),
+            exec_timeout,
+            max_completion_tokens,
+        )
 
     with open(results_path, "a") as outf:
         ex = ThreadPoolExecutor(max_workers=workers)
         try:
-            futs = {
-                ex.submit(_run_one, it): it
-                for it in pending
-            }
+            futs = {ex.submit(_run_one, it): it for it in pending}
             pending_futs = set(futs)
             while pending_futs:
                 done, _ = wait(pending_futs, timeout=5, return_when=FIRST_COMPLETED)
@@ -393,8 +446,8 @@ def run_batch(
                     item = futs[fut]
                     try:
                         res = fut.result()
-                    except Exception as e:  # noqa: BLE001
-                        res = _error_result(item, e)
+                    except Exception as exc:  # noqa: BLE001
+                        res = _error_result(item, exc)
                     results.append(res)
                     completed += 1
                     if res.get("hard", 0):
@@ -410,6 +463,7 @@ def run_batch(
                     outf.flush()
                 for fut in timed_out:
                     pending_futs.remove(fut)
+                    fut.cancel()
                     res = _timeout_result(futs[fut])
                     results.append(res)
                     completed += 1

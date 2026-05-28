@@ -1,0 +1,47 @@
+# NL2SQL Training Configuration
+
+# Core environment settings
+env: "nl2sql"
+split_mode: "split_dir"
+split_dir: "data/nl2sql"
+
+# Target Model (The local student)
+target_model:
+  model: "qwen3.5:2b"
+  api_type: "openai"
+  endpoint: "http://localhost:11434/v1"
+  api_key: "ollama"
+  auth_mode: "api_key"
+  temperature: 0.0
+
+# Optimizer Model (The cloud teacher)
+optimizer_model:
+  model: "deepseek/deepseek-v4-flash"
+  api_type: "openai"
+  endpoint: "https://api.polza.ai/v1"
+  api_key: "YOUR_API_KEY"
+  auth_mode: "api_key"
+  temperature: 0.1
+
+# Training parameters
+num_epochs: 3
+batch_size: 5
+accumulation: 1
+seed: 42
+merge_batch_size: 5
+edit_budget: 4
+min_edit_budget: 2
+validation_interval: 1
+
+# Evaluation parameters
+sel_env_num: 2
+test_env_num: 1
+eval_val: true
+eval_test: true
+diagnostic_mode: false
+
+# Initial Skill
+skill_init: "configs/nl2sql/initial_skill.md"
+
+# Output
+out_root: "outputs/nl2sql"

@@ -1,4 +1,4 @@
-"""SearchQA task dataloader."""
+"""NL2SQL task dataloader."""
 from __future__ import annotations
 
 import json
@@ -31,8 +31,8 @@ def _load_items(path: str) -> list[dict]:
 
 # ── Dataloader ───────────────────────────────────────────────────────────
 
-class SearchQADataLoader(SplitDataLoader):
-    """SearchQA dataloader.
+class NL2SQLDataLoader(SplitDataLoader):
+    """NL2SQL dataloader.
 
     Each split directory (train/, val/, test/) contains a .json file —
     a JSON array of question items.
