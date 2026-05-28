@@ -21,8 +21,8 @@ This repository takes the powerful SkillOpt engine (which automatically rewrites
 **Requirements:** Python 3.10+
 
 ```bash
-git clone https://github.com/SolarisStation/SkillOpt-wthout-asure.git
-cd SkillOpt-wthout-asure
+git clone https://github.com/SolarisStation/SkillOpt-NL2SQL.git
+cd SkillOpt-NL2SQL
 python -m venv venv
 source venv/bin/activate  # On Windows: .\venv\Scripts\activate
 pip install -r requirements.txt
