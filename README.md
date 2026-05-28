@@ -1,16 +1,18 @@
-# SkillOpt: Executive Strategy for Self-Evolving Agent Skills
+# SkillOpt: Executive Strategy for Self-Evolving Agent Skills (Community Fork: No Azure Required)
+
+*This is a community fork of Microsoft's SkillOpt framework. It has been patched to natively support standard OpenAI endpoints (like OpenAI API, DeepSeek via Polza.ai, Ollama, vLLM) without crashing or requiring Azure OpenAI configurations. It also includes fixes for UTF-8 encoding (Russian language support) and simplified model setup.*
 
 *Train agent skills like you train neural networks — with epochs, (mini-)batchsize, learning rates, and validation gates — but without touching model weights.*
 
-[![Project Page](https://img.shields.io/badge/Project%20Page-SkillOpt-8dbb3c)](https://microsoft.github.io/SkillOpt/) [![Paper](https://img.shields.io/badge/Paper-arXiv-b31b1b)](https://arxiv.org/abs/2605.23904) [![Project Video](https://img.shields.io/badge/Project%20Video-Watch%20Demo-ff0000)](https://youtu.be/JUBMDTCiM0M) [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Project Page](https://img.shields.io/badge/Project%20Page-SkillOpt-8dbb3c)](https://microsoft.github.io/SkillOpt/) [![Paper](https://img.shields.io/badge/Paper-arXiv-b31b1b)](https://arxiv.org/abs/2605.23904) [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## 🎬 SkillOpt Demo Video
+---
 
-https://github.com/user-attachments/assets/eb12d3bc-371c-467f-904d-91b61f339ed7
+## 🛠️ What's new in this Fork?
 
-<p align="center">
-  <a href="https://youtu.be/JUBMDTCiM0M"><b>▶ Watch the full demo on YouTube</b></a>
-</p>
+1. **No Azure Lock-in:** The original `azure_openai.py` wrapper has been bypassed. You can now use `api_type: "openai"` to connect to *any* OpenAI-compatible endpoint (Ollama, DeepSeek, standard OpenAI) without setting dummy Azure variables.
+2. **UTF-8 Support:** Fixed `UnicodeDecodeError` when reading/writing skill files containing non-ASCII (e.g., Russian) characters on Windows.
+3. **Simplified Backend:** A new `simple_openai.py` backend handles direct connections, making local experimentation much faster.
 
 ---
 
@@ -19,81 +21,100 @@ https://github.com/user-attachments/assets/eb12d3bc-371c-467f-904d-91b61f339ed7
 **Requirements:** Python 3.10+
 
 ```bash
-git clone https://github.com/microsoft/SkillOpt.git
-cd SkillOpt
+git clone https://github.com/SolarisStation/SkillOpt-wthout-asure.git
+cd SkillOpt-wthout-asure
+python -m venv venv
+source venv/bin/activate  # On Windows: .\venv\Scripts\activate
+pip install -r requirements.txt
 pip install -e .
-
-# For ALFWorld benchmark (optional):
-pip install -e ".[alfworld]"
-alfworld-download
 ```
 
-### Configure API Credentials
+---
 
-```bash
-cp .env.example .env
-# Edit .env with your API credentials, then:
-source .env
+## Quick Start Configuration
+
+Instead of messy environment variables, this fork strongly encourages configuring your models directly in your `config.yaml` file using the standard `endpoint` and `api_key` keys.
+
+Create a `config.yaml` like this:
+
+```yaml
+# Core environment settings
+env: "searchqa"
+split_mode: "split_dir"
+split_dir: "data/my_split"
+
+# Target Model (e.g., Local Ollama student)
+target_model:
+  model: "qwen3.5:2b"
+  api_type: "openai"
+  endpoint: "http://localhost:11434/v1"
+  api_key: "ollama"
+  auth_mode: "api_key"
+  temperature: 0.0
+
+# Optimizer Model (e.g., DeepSeek cloud teacher)
+optimizer_model:
+  model: "deepseek/deepseek-v4-flash"
+  api_type: "openai"
+  endpoint: "https://api.polza.ai/v1" # Or https://api.deepseek.com/v1
+  api_key: "YOUR_API_KEY"
+  auth_mode: "api_key"
+  temperature: 0.1
+
+# Training parameters
+num_epochs: 3
+batch_size: 5
+accumulation: 1
+seed: 42
+merge_batch_size: 5
+edit_budget: 4
+min_edit_budget: 2
+validation_interval: 1
+
+# Evaluation parameters
+sel_env_num: 2
+test_env_num: 1
+eval_val: true
+eval_test: true
+
+skill_init: "configs/initial_skill.md"
+out_root: "outputs/my_training"
 ```
 
-**Azure OpenAI** (recommended):
-```bash
-export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
-# Option 1: API key auth
-export AZURE_OPENAI_API_KEY="your-key"
-# Option 2: Azure CLI auth (no API key needed)
-export AZURE_OPENAI_AUTH_MODE="azure_cli"
-```
+### Run Training
 
-> **Note:** `AZURE_OPENAI_ENDPOINT` is always required. Without it, all LLM calls will fail.
-
-**OpenAI** directly:
 ```bash
-export OPENAI_API_KEY="sk-..."
-```
-
-**Anthropic Claude**:
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-```
-
-**Qwen (local vLLM)**:
-```bash
-export QWEN_CHAT_BASE_URL="http://localhost:8000/v1"
-export QWEN_CHAT_MODEL="Qwen/Qwen3.5-4B"
+python scripts/train.py --config config.yaml
 ```
 
 ---
 
 ## Data Preparation
 
-SkillOpt expects data in a **split directory** with `train/`, `val/`, `test/` subdirectories, each containing a JSON file (e.g., `items.json`).
+SkillOpt expects data in a **split directory** with `train/`, `val/`, `test/` subdirectories, each containing a JSON file (e.g., `items.json` or `data.json`).
 
 ```
 data/my_split/
-├── train/items.json
-├── val/items.json
-└── test/items.json
+├── train/data.json
+├── val/data.json
+└── test/data.json
 ```
 
-Each JSON file is an array of task items. The required fields depend on the benchmark. For example, SearchQA items look like:
+Each JSON file is an array of task items. Example for QA tasks:
 
 ```json
 [
   {
-    "id": "unique_item_id",
-    "question": "Who wrote the novel ...",
-    "context": "[DOC] relevant passage text ...",
-    "answers": ["expected answer"]
+    "id": "1",
+    "question": "Сколько пользователей зарегистрировано в системе?",
+    "answers": ["SELECT COUNT(*) FROM users;"]
   }
 ]
 ```
 
-See `skillopt/envs/<benchmark>/dataloader.py` for the exact format each benchmark expects.
+---
 
-> **Note:** Benchmark datasets are not included in this repository. Prepare your own data following the format above.
-
-### Supported Benchmarks
+## Supported Benchmarks (From Original Repo)
 
 | Benchmark | Type | Config |
 |---|---|---|
